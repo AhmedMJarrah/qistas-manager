@@ -9,12 +9,12 @@ import streamlit as st
 from common import design, load_extracted, norm, clean, identity_card, show_evidence, LABELS, node_search_text
 from ui_components import hero, metrics, section_title, instruction_line, badge
 from assignments import load_tasks, assigned_edges, summarize, DEFAULT_STEPS
-from review_workspace import render_workspace, article_numbers, search_normalize
+from review_workspace import render_workspace, article_numbers
 from review_auth import authenticate
 from sheets_store import SheetsStore, StoreError, SaveUncertain, make_event
 
 ROOT = Path(__file__).resolve().parent
-VERDICTS = {'CONFIRM': 'تأكيد بالدليل', 'REJECT': 'رفض بالدليل', 'NEEDS_REVIEW': 'مراجعة إضافية'}
+VERDICTS = {'CONFIRM': 'تأكيد العلاقة', 'REJECT': 'رفض العلاقة', 'NEEDS_REVIEW': 'مراجعة إضافية'}
 design('مِعيار | مهام المتطوعين')
 try:
     accounts = st.secrets.get('reviewers', {})
@@ -159,21 +159,18 @@ if workspace:
         show_evidence(edge)
     section_title('قراري لهذه الحالة', subtitle='لا يوجد قرار افتراضي؛ احفظ بعد قراءة الدليل.')
     with st.container(key='decision_panel', border=True):
+        st.caption('اختر القرار للحفظ. سبب القرار ومواد القانون والرابط ومقتطف الدليل كلها اختيارية.')
         with st.form('decision_'+edge_id):
             verdict = st.radio('القرار', list(VERDICTS), index=None, format_func=VERDICTS.get, horizontal=True)
-            note = st.text_area('سبب القرار — مطلوب', max_chars=4000, placeholder='ماذا يثبت الرابط أو يعارضه؟ وإن احتاج متابعة، ما المعلومة الناقصة؟')
-            legislative_articles = st.text_input('مواد القانون التي تجيز إصدار النظام — مطلوبة للتأكيد', max_chars=200, placeholder='مثال: 2، 140. اكتب ما تحققت منه، وليس ما يظهر تلقائياً فقط.')
-            url = st.text_input('رابط الدليل', max_chars=2000, placeholder='https://…')
-            text = st.text_area('مقتطف الدليل أو نص المادة', max_chars=12000, placeholder='اذكر المصدر ورقم المادة مع المقتطف ذي الصلة.')
+            note = st.text_area('سبب القرار — اختياري', max_chars=4000, placeholder='يمكنك توضيح سبب القرار أو ما يحتاج متابعة.')
+            legislative_articles = st.text_input('مواد القانون التي تجيز إصدار النظام — اختيارية', max_chars=200, placeholder='مثال: 2، 140. يمكن تركها فارغة.')
+            url = st.text_input('رابط الدليل — اختياري', max_chars=2000, placeholder='https://… أو اتركه فارغًا')
+            text = st.text_area('مقتطف الدليل أو نص المادة — اختياري', max_chars=11700, placeholder='يمكنك إضافة مقتطف من المصدر أو تركه فارغًا.')
             submitted = st.form_submit_button('حفظ والانتقال للحالة التالية', type='primary', icon=':material/task_alt:', width='stretch')
         if submitted:
             try:
                 if edge_id not in assigned_ids:
                     raise ValueError('هذه الحالة خارج المهمة المخصصة لك.')
-                if verdict == 'CONFIRM' and not any(token.isdigit() for token in search_normalize(legislative_articles).split()):
-                    raise ValueError('للتأكيد، أدخل أرقام مواد القانون التي تشكل سند إصدار النظام.')
-                if verdict in ('CONFIRM', 'REJECT') and not (url.strip() or text.strip()):
-                    raise ValueError('أضف رابط الدليل أو مقتطفاً منه؛ إدخال أرقام المواد وحده لا يكفي.')
                 evidence_text = (('مواد القانون التي راجعتها كسند للإصدار: '+legislative_articles.strip()+'\n') if legislative_articles.strip() else '')+text.strip()
                 fingerprint = hashlib.sha256(json.dumps([graph['version'],reviewer,edge_id,verdict,note.strip(),url.strip(),evidence_text],ensure_ascii=False).encode()).hexdigest()
                 pending = st.session_state.setdefault('pending_saves', {})

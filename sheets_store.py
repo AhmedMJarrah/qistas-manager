@@ -31,14 +31,12 @@ def validate_event(event):
     note = event.get('note', '').strip()
     url = event.get('evidence_url', '').strip()
     text = event.get('evidence_text', '').strip()
-    if not 8 <= len(note) <= 4000:
-        raise ValueError('اكتب سبباً واضحاً بين 8 و4000 حرف.')
+    if len(note) > 4000:
+        raise ValueError('سبب القرار يتجاوز 4000 حرف.')
     if len(url) > 2000 or len(text) > 12000:
         raise ValueError('الدليل يتجاوز الحد المسموح.')
     if url and (urlparse(url).scheme not in ('http', 'https') or not urlparse(url).netloc):
         raise ValueError('رابط الدليل يجب أن يكون عنوان http أو https صحيحاً.')
-    if event['verdict'] in ('CONFIRM', 'REJECT') and not (url or text):
-        raise ValueError('التأكيد والرفض يحتاجان رابط دليل أو مقتطفاً من المصدر.')
 
 
 def make_event(event_id, graph, edge, reviewer, verdict, note, url, text):
