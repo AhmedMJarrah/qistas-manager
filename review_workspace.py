@@ -73,7 +73,11 @@ def render_workspace(graph, assigned, eligible, latest):
     anchor = 'child' if mode == 'BYLAW' else 'parent'
     other = 'parent' if anchor == 'child' else 'child'
     title, counterpart = ('النظام', 'القانون') if anchor == 'child' else ('القانون', 'النظام')
-    with st.container(border=True):
+    with st.popover('خيارات العرض', icon=':material/tune:', width='stretch'):
+        size = st.radio('حجم النص', ['مريح', 'كبير'], horizontal=True, key='review_text_size')
+        layout = st.radio('ترتيب البطاقات', ['قائمة', 'بطاقتان في الصف'], key='review_card_layout')
+    st.markdown('<style>:root{--reading-size:'+('20px' if size == 'كبير' else '18px')+';}</style>', unsafe_allow_html=True)
+    with st.container(border=True, key='review_search_panel'):
         a, b = st.columns(2)
         with a:
             query = st.text_input('ابحث عن '+title, key='work_anchor_query', icon=':material/search:',
@@ -128,7 +132,9 @@ def render_workspace(graph, assigned, eligible, latest):
     group = sorted(groups[chosen], key=lambda e: (search_normalize(graph['nodes'][e[other]]['name']), e['id']))
     reviewed = sum(latest.get(e['id'], {}).get('verdict') in ('CONFIRM', 'REJECT') for e in assigned_group)
     node = graph['nodes'][chosen]
-    st.markdown('<div class="tree-parent"><span class="tree-node-kind">'+html.escape(title)+'</span><h3>'+html.escape(node['name'])+'</h3><span class="tree-count">'+f'{len({e[other] for e in assigned_group}):,} {counterpart} في حصتي · {reviewed:,} / {len(assigned_group):,} علاقة محسومة'+'</span></div>', unsafe_allow_html=True)
+    ratio = round(reviewed / len(assigned_group) * 100) if assigned_group else 0
+    st.markdown('<div class="tree-parent review-root"><div class="root-eyebrow"><span>'+html.escape(title)+' المختار</span><span>'+f'{len({e[other] for e in assigned_group}):,} {counterpart} في حصتي'+'</span></div><h3>'+html.escape(node['name'])+'</h3><div class="root-footer"><span>'+f'{reviewed:,} من {len(assigned_group):,} علاقة محسومة'+'</span><strong>'+str(ratio)+'%</strong></div></div>', unsafe_allow_html=True)
+    st.progress(reviewed / len(assigned_group) if assigned_group else 0, text='تقدمي في علاقات هذا '+title)
     st.caption('هذه علاقات حصتك فقط؛ الأنظمة أو القوانين المعروضة لا تثبت اكتمال التشريع في المصدر. نفس القانون قد تكون له علاقات لدى متطوع آخر.')
     section_title(counterpart+' المرتبط — اختر علاقة لتدقيق سندها', len(group))
     branch_pages = (len(group) + 7) // 8
@@ -150,16 +156,20 @@ def render_workspace(graph, assigned, eligible, latest):
     st.caption(f'عرض {min((branch_page-1)*8+1, len(group))}–{min(branch_page*8, len(group))} من {len(group)} علاقة مطابقة · 8 علاقات في الصفحة')
     def choose(eid):
         st.session_state['selected_edge'] = eid
-    for edge in visible:
+    columns = st.columns(2, gap='medium') if layout == 'بطاقتان في الصف' else None
+    for position, edge in enumerate(visible):
         n = graph['nodes'][edge[other]]
         decision = latest.get(edge['id'], {}).get('verdict')
         label = {'CONFIRM': 'مؤكدة بقراري', 'REJECT': 'مرفوضة بقراري', 'NEEDS_REVIEW': 'تحتاج متابعة'}.get(decision, 'لم أراجعها')
         active = st.session_state['selected_edge'] == edge['id']
-        with st.container(border=True):
-            st.markdown('**'+html.escape(n['name'])+'**')
-            st.caption(f"رقم {n.get('number') or 'غير محدد'} · سنة {n.get('year') or 'غير محددة'} · {label}")
+        tone = {'CONFIRM': 'confirmed', 'REJECT': 'rejected', 'NEEDS_REVIEW': 'followup'}.get(decision, 'new')
+        icon = {'CONFIRM': '✓', 'REJECT': '×', 'NEEDS_REVIEW': '↻'}.get(decision, '○')
+        host = columns[position % 2] if columns else st
+        with host.container(border=True, key=('review_active_' if active else 'review_card_')+edge['id']):
+            st.markdown('<div class="review-card-head"><span class="review-kind">'+html.escape(counterpart)+'</span><span class="review-status '+tone+'">'+icon+' '+label+'</span></div><h4 class="review-card-title">'+html.escape(n['name'])+'</h4><div class="review-meta"><span>الرقم <strong>'+html.escape(str(n.get('number') or 'غير محدد'))+'</strong></span><span>السنة <strong>'+html.escape(str(n.get('year') or 'غير محددة'))+'</strong></span></div>', unsafe_allow_html=True)
             materials = article_numbers(edge)
-            st.caption('مواد السند المذكورة: '+('، '.join(materials) if materials else 'غير محددة؛ تحتاج مراجعة المصدر'))
+            chips = ''.join('<span class="article-chip">'+html.escape(x)+'</span>' for x in materials)
+            st.markdown('<div class="review-basis"><span>مواد السند المذكورة</span><div>'+ (chips or '<span class="basis-missing">غير محددة · تحتاج المصدر</span>')+'</div></div>', unsafe_allow_html=True)
             st.button('العلاقة المختارة — الدليل والقرار أدناه' if active else 'تدقيق هذه العلاقة',
                       key='work_pick_'+edge['id'], type='primary' if active else 'secondary',
                       icon=':material/fact_check:', on_click=choose, args=(edge['id'],), width='stretch')
