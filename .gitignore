@@ -1,0 +1,12 @@
+.streamlit/secrets.toml
+.streamlit/secrets.toml.*
+.streamlit/secrets*.toml
+.streamlit/secrets*.toml.*
+.env
+.env.*
+*service_account*.json
+*credentials*.json
+*secret*backup*
+.venv/
+__pycache__/
+*.pyc
