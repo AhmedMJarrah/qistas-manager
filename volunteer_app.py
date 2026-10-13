@@ -9,6 +9,7 @@ import streamlit as st
 from common import design, load_extracted, norm, clean, identity_card, show_evidence, LABELS, node_search_text
 from ui_components import hero, metrics, section_title, instruction_line, badge
 from assignments import load_tasks, assigned_edges, summarize, DEFAULT_STEPS
+from review_workspace import render_workspace, article_numbers, search_normalize
 from review_auth import authenticate
 from sheets_store import SheetsStore, StoreError, SaveUncertain, make_event
 
@@ -72,9 +73,10 @@ if not task:
     st.stop()
 
 graph = load_extracted()
-assigned = assigned_edges(graph, task)
+assigned = [e for e in assigned_edges(graph, task)
+            if graph['nodes'][e['parent']]['kind'] == 'قانون' and graph['nodes'][e['child']]['kind'] == 'نظام']
 assigned_ids = {edge['id'] for edge in assigned}
-hero('مرحباً '+str(display)+'، هذه مساحة عملك.','مراجعة بالدليل، تعليمات واضحة، وحفظ كل قرار في سجل الفريق.','مهام المتطوعين',True)
+hero('القانون، أنظمته، وسند إصدارها.','مرحباً '+str(display)+' · تحقق من القانون والنظام ومواد السند، ثم وثّق قرارك.','مراجعة القوانين والأنظمة',True)
 with st.container(key='my_task', border=True):
     section_title('المطلوب مني', subtitle=task.get('title', 'مراجعة العلاقات المخصصة لك'))
     st.write(task.get('instructions', 'راجع الحالات في حصتك واتبع خطوات المراجعة أدناه.'))
@@ -124,58 +126,43 @@ with st.sidebar:
     st.markdown('### قائمة عملي')
     queue = st.radio('الحالات المعروضة', ['NEW', 'FOLLOW_UP', 'ALL'],
                      format_func=lambda x:{'NEW':'لم أبدأها','FOLLOW_UP':'تحتاج متابعة','ALL':'كل حصتي'}[x], key='queue_mode')
-    parent_types = st.multiselect('نوع التشريع الأب', sorted({graph['nodes'][e['parent']]['kind'] for e in assigned}), key='parent_filter')
-    child_types = st.multiselect('نوع التشريع الابن', sorted({graph['nodes'][e['child']]['kind'] for e in assigned}), key='child_filter')
-    statuses = st.multiselect('حالة المصدر', sorted({e['status'] for e in assigned}), format_func=LABELS.get)
+    st.caption('النطاق الحالي: قانون ← نظام، فقط.')
+    statuses = st.multiselect('حالة المصدر', sorted({e['status'] for e in assigned}), format_func=LABELS.get, key='work_statuses', help='فارغ يعرض كل حالات المصدر؛ هذه الحالة منفصلة عن قرارك.')
     if st.button('تحديث سجل الفريق', icon=':material/refresh:', width='stretch'):
         read_rows.clear()
         st.rerun()
     st.caption('الفلاتر تضيق حصتك؛ لا تضيف حالات خارج المهمة.')
 
-query = st.text_input('ابحث داخل حصتك', placeholder='اسم الأب أو الابن أو معرّف الرابط…', key='work_search')
 pool = summary['unreviewed'] if queue == 'NEW' else summary['pending'] if queue == 'FOLLOW_UP' else assigned_ids
-candidates = [e for e in assigned if e['id'] in pool
-              and (not parent_types or graph['nodes'][e['parent']]['kind'] in parent_types)
-              and (not child_types or graph['nodes'][e['child']]['kind'] in child_types)
-              and (not statuses or e['status'] in statuses)
-              and (not query or norm(query) in norm(node_search_text(graph['nodes'][e['parent']])+' '+node_search_text(graph['nodes'][e['child']])+' '+e['id']))]
-rank = {'REVIEW_REQUIRED':0, 'CANDIDATE_ONLY':1}
-candidates.sort(key=lambda e:(rank.get(e['status'],2), e['id']))
-st.caption(f'نتائج قائمة العمل الحالية: {len(candidates):,}. حالة المصدر منفصلة عن قرارك.')
+eligible = [e for e in assigned if e['id'] in pool and (not statuses or e['status'] in statuses)]
+workspace = render_workspace(graph, assigned, eligible, summary['latest'])
 
-if candidates:
-    # Limit the widget size; navigation advances through all matching work in batches.
-    pages = max(1, (len(candidates) + 99) // 100)
-    if st.session_state.get('work_page',1) > pages:
-        st.session_state['work_page'] = 1
-    page = st.number_input('صفحة الحالات', min_value=1, max_value=pages, key='work_page')
-    batch = candidates[(page-1)*100:page*100]
-    ids = [e['id'] for e in batch]
-    next_id = st.session_state.pop('next_id', None)
-    if next_id in ids:
-        st.session_state['selected_edge'] = next_id
-    if st.session_state.get('selected_edge') not in ids:
-        st.session_state['selected_edge'] = ids[0]
-    edge_id = st.selectbox('الحالة الحالية', ids, key='selected_edge',
-                           format_func=lambda eid:clean(graph['nodes'][graph['edge_by_id'][eid]['parent']]['name'])[:75]+' ← '+clean(graph['nodes'][graph['edge_by_id'][eid]['child']]['name'])[:75])
-    edge = graph['edge_by_id'][edge_id]
+if workspace:
+    edge, successor = workspace
+    edge_id = edge['id']
+    st.divider()
+    section_title('تدقيق العلاقة المختارة', subtitle='قرارك يخص هذا القانون وهذا النظام فقط.')
     st.markdown(badge(edge['status']), unsafe_allow_html=True)
-    instruction_line('المطلوب في هذه الحالة: تحقق من هوية التشريعين، ثم أثبت أو انْفِ اتجاه الرابط بمصدر؛ إن لم تكفِ الأدلة اختر مراجعة إضافية وحدد ما ينقص.')
+    instruction_line('هل هذا النظام صدر بمقتضى هذا القانون؟ حدّد مواد القانون التي تجيز إصداره، وراجع عبارة الإصدار. مجرد ذكر القانون في متن النظام لا يكفي.')
     parent, child = st.columns(2, gap='large')
     with parent:
-        section_title('التشريع الأب')
+        section_title('القانون — سند الإصدار')
         identity_card(graph['nodes'][edge['parent']])
     with child:
-        section_title('التشريع الابن')
+        section_title('النظام — الصادر بمقتضى القانون')
         identity_card(graph['nodes'][edge['child']])
     with st.container(border=True):
-        section_title('الدليل المتاح')
+        section_title('عبارة الإصدار والسند المتاح')
+        materials = article_numbers(edge)
+        st.write('**مواد السند المذكورة في الاستخراج:** '+('، '.join(materials) if materials else 'غير محددة'))
+        st.caption('هذه إشارات من المصدر وليست قرار تحقق؛ تحقق من نص مواد القانون وعبارة إصدار النظام.')
         show_evidence(edge)
     section_title('قراري لهذه الحالة', subtitle='لا يوجد قرار افتراضي؛ احفظ بعد قراءة الدليل.')
     with st.container(key='decision_panel', border=True):
         with st.form('decision_'+edge_id):
             verdict = st.radio('القرار', list(VERDICTS), index=None, format_func=VERDICTS.get, horizontal=True)
             note = st.text_area('سبب القرار — مطلوب', max_chars=4000, placeholder='ماذا يثبت الرابط أو يعارضه؟ وإن احتاج متابعة، ما المعلومة الناقصة؟')
+            legislative_articles = st.text_input('مواد القانون التي تجيز إصدار النظام — مطلوبة للتأكيد', max_chars=200, placeholder='مثال: 2، 140. اكتب ما تحققت منه، وليس ما يظهر تلقائياً فقط.')
             url = st.text_input('رابط الدليل', max_chars=2000, placeholder='https://…')
             text = st.text_area('مقتطف الدليل أو نص المادة', max_chars=12000, placeholder='اذكر المصدر ورقم المادة مع المقتطف ذي الصلة.')
             submitted = st.form_submit_button('حفظ والانتقال للحالة التالية', type='primary', icon=':material/task_alt:', width='stretch')
@@ -183,19 +170,22 @@ if candidates:
             try:
                 if edge_id not in assigned_ids:
                     raise ValueError('هذه الحالة خارج المهمة المخصصة لك.')
-                fingerprint = hashlib.sha256(json.dumps([graph['version'],reviewer,edge_id,verdict,note.strip(),url.strip(),text.strip()],ensure_ascii=False).encode()).hexdigest()
+                if verdict == 'CONFIRM' and not any(token.isdigit() for token in search_normalize(legislative_articles).split()):
+                    raise ValueError('للتأكيد، أدخل أرقام مواد القانون التي تشكل سند إصدار النظام.')
+                if verdict in ('CONFIRM', 'REJECT') and not (url.strip() or text.strip()):
+                    raise ValueError('أضف رابط الدليل أو مقتطفاً منه؛ إدخال أرقام المواد وحده لا يكفي.')
+                evidence_text = (('مواد القانون التي راجعتها كسند للإصدار: '+legislative_articles.strip()+'\n') if legislative_articles.strip() else '')+text.strip()
+                fingerprint = hashlib.sha256(json.dumps([graph['version'],reviewer,edge_id,verdict,note.strip(),url.strip(),evidence_text],ensure_ascii=False).encode()).hexdigest()
                 pending = st.session_state.setdefault('pending_saves', {})
                 event = pending.get(fingerprint)
                 if event is None:
-                    event = make_event(str(uuid.uuid4()), graph, edge, reviewer, verdict, note, url, text)
+                    event = make_event(str(uuid.uuid4()), graph, edge, reviewer, verdict, note, url, evidence_text)
                     pending[fingerprint] = event
                 store.save(event)
                 pending.pop(fingerprint, None)
                 read_rows.clear()
                 st.session_state['review_flash'] = 'تم تأكيد حفظ قرارك في Google Sheets. تستطيع العودة إليه من «كل حصتي».'
-                if queue != 'NEW':
-                    position = ids.index(edge_id)
-                    st.session_state['next_id'] = ids[(position+1) % len(ids)]
+                st.session_state['work_next_edge'] = successor
                 st.rerun()
             except (ValueError, StoreError) as exc:
                 st.error(str(exc))
@@ -209,9 +199,6 @@ if candidates:
                     st.write(event['evidence_url'])
                 if event['evidence_text']:
                     st.write(event['evidence_text'])
-else:
-    st.info('لا توجد حالات مطابقة في هذه القائمة. اختر «تحتاج متابعة» أو «كل حصتي»، أو عدّل الفلاتر.')
-
 st.divider()
 own_rows = [r for r in rows if r['reviewer']==reviewer]
 st.download_button('تنزيل سجل قراراتي JSON', json.dumps({'dataset':'EXTRACTED','dataset_version':graph['version'],'reviews':own_rows},ensure_ascii=False,indent=2),
@@ -225,4 +212,4 @@ if task.get('admin',False):
             st.write(f"**{name}** · الحصة {stats['total']:,} · المحسوم {len(stats['done']):,} · متابعة {len(stats['pending']):,} · لم يبدأ {len(stats['unreviewed']):,}")
         st.download_button('تنزيل سجل الفريق JSON', json.dumps({'dataset':'EXTRACTED','dataset_version':graph['version'],'reviews':rows},ensure_ascii=False,indent=2),
                            file_name='team_reviews.json', mime='application/json')
-st.caption('قرارات المراجعة محفوظة مستقلة؛ ملفات التشريعات لا تتغير تلقائياً.')
+st.caption('نطاق المراجعة الحالي: القوانين والأنظمة فقط. أرقام مواد السند تحفظ مع الدليل في Google Sheets، وكل قراراتك السابقة محفوظة.')
