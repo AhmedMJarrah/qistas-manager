@@ -56,7 +56,7 @@ def node_label(node):
     return f"{node['name']} · رقم {node.get('number') or 'غير محدد'} · {node.get('year') or 'سنة غير محددة'} · {node['id']}"
 
 
-def render_workspace(graph, assigned, eligible, latest):
+def render_workspace(graph, assigned, eligible, latest, parent_label='القانون', child_label='النظام'):
     import streamlit as st
     from ui_components import section_title
 
@@ -69,10 +69,10 @@ def render_workspace(graph, assigned, eligible, latest):
         st.session_state['work_next_edge'] = st.session_state.get('selected_edge')
     mode = st.segmented_control('أراجع حسب', ['LAW', 'BYLAW'], default='LAW', required=True, key='work_direction',
                                 on_change=switch_direction,
-                                format_func=lambda v: 'القانون ← أنظمته' if v == 'LAW' else 'النظام ← قوانين سنده', width='stretch')
+                                format_func=lambda v: parent_label+' ← الارتباطات التابعة' if v == 'LAW' else child_label+' ← الارتباطات السابقة', width='stretch')
     anchor = 'child' if mode == 'BYLAW' else 'parent'
     other = 'parent' if anchor == 'child' else 'child'
-    title, counterpart = ('النظام', 'القانون') if anchor == 'child' else ('القانون', 'النظام')
+    title, counterpart = (child_label, parent_label) if anchor == 'child' else (parent_label, child_label)
     with st.popover('خيارات العرض', icon=':material/tune:', width='stretch'):
         size = st.radio('حجم النص', ['مريح', 'كبير'], horizontal=True, key='review_text_size')
         layout = st.radio('ترتيب البطاقات', ['قائمة', 'بطاقتان في الصف'], key='review_card_layout')
@@ -135,7 +135,7 @@ def render_workspace(graph, assigned, eligible, latest):
     ratio = round(reviewed / len(assigned_group) * 100) if assigned_group else 0
     st.markdown('<div class="tree-parent review-root"><div class="root-eyebrow"><span>'+html.escape(title)+' المختار</span><span>'+f'{len({e[other] for e in assigned_group}):,} {counterpart} في حصتي'+'</span></div><h3>'+html.escape(node['name'])+'</h3><div class="root-footer"><span>'+f'{reviewed:,} من {len(assigned_group):,} علاقة محسومة'+'</span><strong>'+str(ratio)+'%</strong></div></div>', unsafe_allow_html=True)
     st.progress(reviewed / len(assigned_group) if assigned_group else 0, text='تقدمي في علاقات هذا '+title)
-    st.caption('هذه علاقات حصتك فقط؛ الأنظمة أو القوانين المعروضة لا تثبت اكتمال التشريع في المصدر. نفس القانون قد تكون له علاقات لدى متطوع آخر.')
+    st.caption('هذه علاقات حصتك في المهمة المختارة فقط؛ المعروض لا يثبت اكتمال ارتباطات التشريع في المصدر. قد توجد علاقات أخرى له لدى متطوع آخر.')
     section_title(counterpart+' المرتبط — اختر علاقة لتدقيق سندها', len(group))
     branch_pages = (len(group) + 7) // 8
     edge_ids = [e['id'] for e in group]

@@ -8,9 +8,10 @@ import uuid
 import streamlit as st
 from common import design, load_extracted, norm, clean, identity_card, show_evidence, LABELS, node_search_text
 from ui_components import hero, metrics, section_title, instruction_line, badge
-from assignments import load_tasks, assigned_edges, summarize, resolve_handoffs, DEFAULT_STEPS
+from assignments import load_tasks, assigned_edges, summarize, DEFAULT_STEPS
 from review_workspace import render_workspace, article_numbers
-from review_auth import authenticate
+from review_auth import authenticate, canonical_accounts, canonical_username, reviewer_name
+from review_tasks import task_catalog, select_tasks, activate_task, LAW_BYLAW
 from sheets_store import SheetsStore, StoreError, SaveUncertain, make_event
 
 ROOT = Path(__file__).resolve().parent
@@ -20,6 +21,11 @@ try:
     accounts = st.secrets.get('reviewers', {})
 except Exception:
     accounts = {}
+try:
+    accounts = canonical_accounts(accounts)
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
 if not accounts:
     hero('مساحة المتطوعين.','مراجعة العلاقات بالدليل، مع مهمة واضحة لكل مراجع.','تسجيل الدخول',True)
     st.info('حسابات المراجعين لم تُضف بعد. مسؤول التطبيق يضيفها في إعدادات الاستضافة.')
@@ -37,14 +43,14 @@ if not reviewer:
     with st.container(key='login_panel'):
         st.subheader('تسجيل الدخول')
         with st.form('login'):
-            username = st.text_input('اسم المستخدم', placeholder='مثال: v1', max_chars=100)
+            username = st.text_input('اسم المستخدم', placeholder='مثال: ayah أو talal', max_chars=100)
             password = st.text_input('كلمة المرور', type='password', max_chars=200)
             submitted = st.form_submit_button('دخول', type='primary', width='stretch')
         if submitted:
             if time.time() < st.session_state.get('login_after', 0):
                 st.warning('انتظر ثواني قليلة قبل محاولة جديدة.')
             elif authenticate(accounts, username, password):
-                reviewer = username.strip()
+                reviewer = canonical_username(username)
                 st.session_state.update(reviewer_account=reviewer, auth_signature=signature(accounts[reviewer]),
                                         authenticated_at=time.time(), login_failures=0)
                 st.rerun()
@@ -99,24 +105,33 @@ except StoreError as exc:
     st.info('المراجعة والحفظ ينتظران الاتصال بسجل الفريق. حاول التحديث أو تواصل مع المسؤول.')
     st.stop()
 
-tasks = resolve_handoffs(tasks, rows)
+base_tasks = tasks
+catalog = task_catalog(graph)
+with st.sidebar:
+    st.divider()
+    st.markdown('### الارتباطات التشريعية')
+    category = st.selectbox('انتقل إلى مهمة', list(catalog), key='relationship_task',
+                            format_func=lambda k: catalog[k]['title'] + f" · {catalog[k]['total']:,}")
+    st.caption('لكل مهمة حصة وتقدم مستقلان. احفظ القرار الحالي قبل الانتقال.')
+activate_task(st.session_state, category)
+context = catalog[category]
+tasks = select_tasks(graph, base_tasks, rows, context)
 task = tasks[reviewer]
 if task.get('admin', False):
     with st.sidebar:
         page = st.radio('مساحة المسؤول', ['متابعة الفريق', 'مراجعة العلاقات'], key='admin_page')
     if page == 'متابعة الفريق':
         from admin_dashboard import render_dashboard
-        render_dashboard(graph, tasks, rows, reviewer, accounts)
+        render_dashboard(graph, tasks, rows, reviewer, accounts, context)
         if st.button('تحديث التقدم الآن', icon=':material/refresh:', type='primary'):
             read_rows.clear()
             st.rerun()
         st.caption('اضغط تحديث لجلب أحدث سجل من Google Sheets. القراءة مخزنة مؤقتاً لمدة تصل إلى 30 ثانية.')
         st.stop()
 
-assigned = [e for e in assigned_edges(graph, task)
-            if graph['nodes'][e['parent']]['kind'] == 'قانون' and graph['nodes'][e['child']]['kind'] == 'نظام']
+assigned = assigned_edges(graph, task)
 assigned_ids = {edge['id'] for edge in assigned}
-hero('القانون، أنظمته، وسند إصدارها.','مرحباً '+str(display)+' · تحقق من القانون والنظام ومواد السند، ثم وثّق قرارك.','مراجعة القوانين والأنظمة',True)
+hero('مراجعة ارتباطات '+context['title'], 'مرحباً '+str(display)+' · تحقق من هوية التشريعين والمواد والدليل، ثم وثّق قرارك.', 'مهمة مستقلة', True)
 with st.container(key='my_task', border=True):
     section_title('المطلوب مني', subtitle=task.get('title', 'مراجعة العلاقات المخصصة لك'))
     st.write(task.get('instructions', 'راجع الحالات في حصتك واتبع خطوات المراجعة أدناه.'))
@@ -145,7 +160,7 @@ with st.sidebar:
     st.markdown('### قائمة عملي')
     queue = st.radio('الحالات المعروضة', ['NEW', 'FOLLOW_UP', 'ALL'],
                      format_func=lambda x:{'NEW':'لم أبدأها','FOLLOW_UP':'تحتاج متابعة','ALL':'كل حصتي'}[x], key='queue_mode')
-    st.caption('النطاق الحالي: قانون ← نظام، فقط.')
+    st.caption('المهمة الحالية: '+context['title'])
     statuses = st.multiselect('حالة المصدر', sorted({e['status'] for e in assigned}), format_func=LABELS.get, key='work_statuses', help='فارغ يعرض كل حالات المصدر؛ هذه الحالة منفصلة عن قرارك.')
     if st.button('تحديث سجل الفريق', icon=':material/refresh:', width='stretch'):
         read_rows.clear()
@@ -154,47 +169,47 @@ with st.sidebar:
 
 pool = summary['unreviewed'] if queue == 'NEW' else summary['pending'] if queue == 'FOLLOW_UP' else assigned_ids
 eligible = [e for e in assigned if e['id'] in pool and (not statuses or e['status'] in statuses)]
-workspace = render_workspace(graph, assigned, eligible, summary['latest'])
+workspace = render_workspace(graph, assigned, eligible, summary['latest'], context['parent_label'], context['child_label'])
 
 if workspace:
     edge, successor = workspace
     edge_id = edge['id']
     st.divider()
-    section_title('تدقيق العلاقة المختارة', subtitle='قرارك يخص هذا القانون وهذا النظام فقط.')
+    section_title('تدقيق العلاقة المختارة', subtitle='قرارك يخص التشريعين والعلاقة المختارة فقط.')
     st.markdown(badge(edge['status']), unsafe_allow_html=True)
-    instruction_line('هل هذا النظام صدر بمقتضى هذا القانون؟ حدّد مواد القانون التي تجيز إصداره، وراجع عبارة الإصدار. مجرد ذكر القانون في متن النظام لا يكفي.')
+    instruction_line('هل هذا النظام صدر بمقتضى هذا القانون؟ تحقق من مواد السند وعبارة الإصدار.' if category == LAW_BYLAW else 'هل الدليل يثبت الارتباط بين هذين التشريعين واتجاهه؟ تحقق من نوع العلاقة والمواد، ولا تعتبر مجرد الذكر سند إصدار.')
     parent, child = st.columns(2, gap='large')
     with parent:
-        section_title('القانون — سند الإصدار')
+        section_title(context['parent_label']+' — طرف العلاقة الأول')
         identity_card(graph['nodes'][edge['parent']])
     with child:
-        section_title('النظام — الصادر بمقتضى القانون')
+        section_title(context['child_label']+' — طرف العلاقة الثاني')
         identity_card(graph['nodes'][edge['child']])
     with st.container(border=True):
-        section_title('عبارة الإصدار والسند المتاح')
+        section_title('الدليل والمواد المتاحة')
         materials = article_numbers(edge)
         st.write('**مواد السند المذكورة في الاستخراج:** '+('، '.join(materials) if materials else 'غير محددة'))
-        st.caption('هذه إشارات من المصدر وليست قرار تحقق؛ تحقق من نص مواد القانون وعبارة إصدار النظام.')
+        st.caption('هذه إشارات من المصدر وليست قرار تحقق؛ راجع نص المواد ونوع العلاقة واتجاهها في المصدر.')
         show_evidence(edge)
     section_title('قراري لهذه الحالة', subtitle='لا يوجد قرار افتراضي؛ احفظ بعد قراءة الدليل.')
     with st.container(key='decision_panel', border=True):
-        st.caption('اختر القرار للحفظ. سبب القرار ومواد القانون والرابط ومقتطف الدليل كلها اختيارية.')
-        with st.form('decision_'+edge_id):
+        st.caption('اختر القرار للحفظ. السبب والمواد والرابط ومقتطف الدليل كلها اختيارية.')
+        with st.form('decision_'+category+'_'+edge_id):
             verdict = st.radio('القرار', list(VERDICTS), index=None, format_func=VERDICTS.get, horizontal=True)
             note = st.text_area('سبب القرار — اختياري', max_chars=4000, placeholder='يمكنك توضيح سبب القرار أو ما يحتاج متابعة.')
-            legislative_articles = st.text_input('مواد القانون التي تجيز إصدار النظام — اختيارية', max_chars=200, placeholder='مثال: 2، 140. يمكن تركها فارغة.')
+            legislative_articles = st.text_input('أرقام المواد التي تدعم الارتباط — اختيارية', max_chars=200, placeholder='مثال: 2، 140. يمكن تركها فارغة.')
             url = st.text_input('رابط الدليل — اختياري', max_chars=2000, placeholder='https://… أو اتركه فارغًا')
             text = st.text_area('مقتطف الدليل أو نص المادة — اختياري', max_chars=11700, placeholder='يمكنك إضافة مقتطف من المصدر أو تركه فارغًا.')
             submitted = st.form_submit_button('حفظ والانتقال للحالة التالية', type='primary', icon=':material/task_alt:', width='stretch')
         if submitted:
             try:
                 live_rows = store.read('EXTRACTED', tuple(dict.fromkeys([graph['version'], *task.get('dataset_versions', [])])))
-                live_tasks = resolve_handoffs(load_tasks(ROOT / 'reviewer_tasks.json'), live_rows)
+                live_tasks = select_tasks(graph, load_tasks(ROOT / 'reviewer_tasks.json'), live_rows, context)
                 live_ids = {e['id'] for e in assigned_edges(graph, live_tasks.get(reviewer))}
                 if edge_id not in live_ids:
                     read_rows.clear()
                     raise ValueError('تغيّرت حصة هذه العلاقة بعد تحديث سجل الفريق. حدّث القائمة؛ لم يُرسل قرارك.')
-                evidence_text = (('مواد القانون التي راجعتها كسند للإصدار: '+legislative_articles.strip()+'\n') if legislative_articles.strip() else '')+text.strip()
+                evidence_text = (('المواد التي راجعتها كدليل للارتباط: '+legislative_articles.strip()+'\n') if legislative_articles.strip() else '')+text.strip()
                 fingerprint = hashlib.sha256(json.dumps([graph['version'],reviewer,edge_id,verdict,note.strip(),url.strip(),evidence_text],ensure_ascii=False).encode()).hexdigest()
                 pending = st.session_state.setdefault('pending_saves', {})
                 event = pending.get(fingerprint)
@@ -229,7 +244,7 @@ if task.get('admin',False):
             if item.get('admin'):
                 continue
             stats = summarize(assigned_edges(graph,item),rows,name)
-            st.write(f"**{name}** · الحصة {stats['total']:,} · المحسوم {len(stats['done']):,} · متابعة {len(stats['pending']):,} · لم يبدأ {len(stats['unreviewed']):,}")
+            st.write(f"**{reviewer_name(name)}** · الحصة {stats['total']:,} · المحسوم {len(stats['done']):,} · متابعة {len(stats['pending']):,} · لم يبدأ {len(stats['unreviewed']):,}")
         st.download_button('تنزيل سجل الفريق JSON', json.dumps({'dataset':'EXTRACTED','dataset_version':graph['version'],'reviews':rows},ensure_ascii=False,indent=2),
                            file_name='team_reviews.json', mime='application/json')
-st.caption('نطاق المراجعة الحالي: القوانين والأنظمة فقط. أرقام مواد السند تحفظ مع الدليل في Google Sheets، وكل قراراتك السابقة محفوظة.')
+st.caption('المهمة الحالية: '+context['title']+' · المواد والدليل تحفظ في Google Sheets، وكل القرارات السابقة تبقى في سجلها.')

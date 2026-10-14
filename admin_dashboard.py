@@ -7,6 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from assignments import assigned_edges, summarize
+from review_auth import reviewer_name, canonical_username
 
 VERDICTS = {'CONFIRM': 'تأكيد', 'REJECT': 'رفض', 'NEEDS_REVIEW': 'تحتاج متابعة'}
 
@@ -18,11 +19,11 @@ def local_time(value):
         return value or 'لم يبدأ'
 
 
-def dashboard_data(graph, tasks, rows):
+def dashboard_data(graph, tasks, rows, context=None):
     """Latest sheet event per (user, edge), retaining all events for history."""
     scoped = {e['id'] for e in graph['edges']
-              if graph['nodes'][e['parent']]['kind'] == 'قانون'
-              and graph['nodes'][e['child']]['kind'] == 'نظام'}
+              if graph['nodes'][e['parent']]['kind'] == (context['parent_kind'] if context else 'قانون')
+              and graph['nodes'][e['child']]['kind'] == (context['child_kind'] if context else 'نظام')}
     latest = {}
     for row in rows:
         latest[row['reviewer'], row['edge_id']] = row
@@ -36,7 +37,7 @@ def dashboard_data(graph, tasks, rows):
         verdicts = Counter(r['verdict'] for r in stats['latest'].values())
         own_rows = [r for r in rows if r['reviewer'] == name]
         done = len(stats['done'])
-        people.append({'المستخدم': name, 'الحصة': stats['total'],
+        people.append({'المستخدم': reviewer_name(name), 'الحصة': stats['total'],
                        'راجع': len(stats['latest']), 'محسوم': done,
                        'تأكيد': verdicts['CONFIRM'], 'رفض': verdicts['REJECT'],
                        'متابعة': len(stats['pending']), 'لم يبدأ': len(stats['unreviewed']),
@@ -75,7 +76,7 @@ def csv_bytes(records):
     return stream.getvalue().encode('utf-8-sig')
 
 
-def render_dashboard(graph, tasks, rows, reviewer, accounts):
+def render_dashboard(graph, tasks, rows, reviewer, accounts, context=None):
     import streamlit as st
     from ui_components import hero, metrics, section_title
 
@@ -84,10 +85,11 @@ def render_dashboard(graph, tasks, rows, reviewer, accounts):
         st.error('هذه الصفحة متاحة لمسؤول المشروع فقط.')
         st.stop()
         return
-    data = dashboard_data(graph, tasks, rows)
+    data = dashboard_data(graph, tasks, rows, context)
+    title = context['title'] if context else 'قانون ← نظام'
     hero('الفريق، والتقدم، وما يحتاج قرارك.',
-         'تابع حصص المتطوعين الستة وآخر قراراتهم من سجل Google Sheets.', 'لوحة مسؤول المشروع', True)
-    metrics([('إجمالي العلاقات', f"{len(data['scoped']):,}", 'قانون ← نظام', 'navy'),
+         'تابع حصص المتطوعين في مهمة '+title+' من سجل Google Sheets.', 'لوحة مسؤول المشروع', True)
+    metrics([('إجمالي العلاقات', f"{len(data['scoped']):,}", title, 'navy'),
              ('محسومة بلا تعارض', f"{len(data['done']):,}", 'آخر القرارات المسجلة', 'teal'),
              ('المتبقي للحسم', f"{len(data['scoped']) - len(data['done']):,}", 'يشمل غير المراجع والمتابعة والتعارض', 'purple'),
              ('تعارض القرارات', f"{len(data['conflicts']):,}", 'علاقات تحتاج حسم المسؤول', 'navy')])
@@ -104,22 +106,22 @@ def render_dashboard(graph, tasks, rows, reviewer, accounts):
         st.download_button('تنزيل ملخص التقدم CSV', csv_bytes(data['people']),
                            'team_progress.csv', 'text/csv', key='admin_progress_csv')
         for person in data['people']:
-            user = person['المستخدم']
-            with st.expander(f"{user} · {accounts.get(user, {}).get('display_name', user)} · {person['محسوم']} / {person['الحصة']}"):
+            user = canonical_username(person['المستخدم'])
+            with st.expander(f"{person['المستخدم']} · {person['محسوم']} / {person['الحصة']}"):
                 st.progress(person['الإنجاز %'] / 100)
                 st.write(f"تأكيد: {person['تأكيد']} · رفض: {person['رفض']} · متابعة: {person['متابعة']} · لم يبدأ: {person['لم يبدأ']}")
                 st.caption('آخر نشاط بتوقيت عمّان: ' + person['آخر نشاط — عمّان'])
                 if user not in accounts:
                     st.info('الحصة جاهزة؛ أضف الحساب في Secrets حتى يستطيع الدخول.')
     with detail:
-        user = st.selectbox('المتطوع', ['الجميع'] + sorted({r['reviewer'] for r in rows}), key='admin_user')
+        user = st.selectbox('المتطوع', ['الجميع'] + sorted({r['reviewer'] for r in rows}), format_func=reviewer_name, key='admin_user')
         decision = st.selectbox('القرار', ['الجميع'] + list(VERDICTS), format_func=lambda x: VERDICTS.get(x, x), key='admin_verdict')
         query = st.text_input('ابحث باسم القانون أو النظام أو معرف العلاقة', key='admin_query').strip().casefold()
         records = [r for r in data['latest'] if r['edge_id'] in data['scoped']
                    and (user == 'الجميع' or r['reviewer'] == user)
                    and (decision == 'الجميع' or r['verdict'] == decision)
                    and (not query or query in ' '.join([r['parent_name'], r['child_name'], r['edge_id']]).casefold())]
-        display = [{'المتطوع': r['reviewer'], 'القانون': r['parent_name'], 'النظام': r['child_name'],
+        display = [{'المتطوع': reviewer_name(r['reviewer']), 'التشريع الأول': r['parent_name'], 'التشريع الثاني': r['child_name'],
                     'القرار': VERDICTS[r['verdict']], 'وقت القرار — عمّان': local_time(r['created_at']),
                     'سبب القرار': r['note'], 'الرابط': r['evidence_url'], 'الدليل والمواد': r['evidence_text'],
                     'معرف العلاقة': r['edge_id']} for r in records]
@@ -128,15 +130,15 @@ def render_dashboard(graph, tasks, rows, reviewer, accounts):
         st.download_button('تنزيل القرارات الظاهرة CSV', csv_bytes(display), 'filtered_reviews.csv', 'text/csv')
     with history:
         st.caption(f'{len(rows):,} عملية حفظ في النسخة الحالية وما يكافئها بتنسيق الأسطر؛ يشمل القرارات السابقة والتعديلات وخارج النطاق الحالي.')
-        st.dataframe(list(reversed(rows)), hide_index=True, width='stretch')
+        st.dataframe([dict(row, reviewer=reviewer_name(row['reviewer'])) for row in reversed(rows)], hide_index=True, width='stretch')
         st.download_button('تنزيل سجل الفريق JSON', json.dumps({'dataset': 'EXTRACTED', 'dataset_version': graph['version'], 'reviews': rows}, ensure_ascii=False, indent=2), 'team_reviews.json', 'application/json', key='admin_history_json')
     with issues:
         section_title('قرارات متعارضة', len(data['conflicts']))
         for eid, events in data['conflicts'].items():
             with st.expander(events[0]['parent_name'] + ' ← ' + events[0]['child_name']):
-                st.dataframe(events, hide_index=True, width='stretch')
-        section_title('قرارات سابقة خارج نطاق قانون ← نظام', len(data['outside']))
+                st.dataframe([dict(row, reviewer=reviewer_name(row['reviewer'])) for row in events], hide_index=True, width='stretch')
+        section_title('قرارات في مهام أخرى أو خارج الشبكة الحالية', len(data['outside']))
         st.caption('تظل محفوظة في سجلها، ولا تدخل في نسبة إنجاز الحصة الحالية.')
-        st.dataframe(data['outside'], hide_index=True, width='stretch')
+        st.dataframe([dict(row, reviewer=reviewer_name(row['reviewer'])) for row in data['outside']], hide_index=True, width='stretch')
         if not data['conflicts']:
             st.success('لا يوجد تعارض بين آخر القرارات المسجلة ضمن النطاق الحالي.')
