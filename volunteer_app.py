@@ -8,7 +8,7 @@ import uuid
 import streamlit as st
 from common import design, load_extracted, norm, clean, identity_card, show_evidence, LABELS, node_search_text
 from ui_components import hero, metrics, section_title, instruction_line, badge
-from assignments import load_tasks, assigned_edges, summarize, DEFAULT_STEPS
+from assignments import load_tasks, assigned_edges, summarize, resolve_handoffs, DEFAULT_STEPS
 from review_workspace import render_workspace, article_numbers
 from review_auth import authenticate
 from sheets_store import SheetsStore, StoreError, SaveUncertain, make_event
@@ -73,21 +73,11 @@ if not task:
     st.stop()
 
 graph = load_extracted()
-assigned = [e for e in assigned_edges(graph, task)
-            if graph['nodes'][e['parent']]['kind'] == 'قانون' and graph['nodes'][e['child']]['kind'] == 'نظام']
-assigned_ids = {edge['id'] for edge in assigned}
-hero('القانون، أنظمته، وسند إصدارها.','مرحباً '+str(display)+' · تحقق من القانون والنظام ومواد السند، ثم وثّق قرارك.','مراجعة القوانين والأنظمة',True)
-with st.container(key='my_task', border=True):
-    section_title('المطلوب مني', subtitle=task.get('title', 'مراجعة العلاقات المخصصة لك'))
-    st.write(task.get('instructions', 'راجع الحالات في حصتك واتبع خطوات المراجعة أدناه.'))
-    types = lambda key: '، '.join(task.get(key, [])) or 'جميع الأنواع'
-    st.caption('نوع الأب: '+types('parent_types')+' · نوع الابن: '+types('child_types'))
-    if task.get('target', 0):
-        st.caption(f"هدف المهمة: {task['target']} علاقة بقرار تأكيد أو رفض؛ المراجعة الإضافية لا تُحسب حسمًا.")
-    with st.expander('خطوات المراجعة بالتفصيل', expanded=True, icon=':material/checklist:'):
-        for number, step in enumerate(task.get('steps') or DEFAULT_STEPS, 1):
-            st.write(f'{number}. {step}')
-
+try:
+    assigned_edges(graph, task)  # Validate the allocation against the unchanged graph.
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
 @st.cache_resource(show_spinner=False)
 def connect_store():
     try:
@@ -103,11 +93,40 @@ def read_rows(sheet_id, name, version, _store):
 
 try:
     store = connect_store()
-    rows = read_rows(store.sheet_id, store.worksheet_name, graph['version'], store)
+    rows = read_rows(store.sheet_id, store.worksheet_name, tuple(dict.fromkeys([graph['version'], *task.get('dataset_versions', [])])), store)
 except StoreError as exc:
     st.error(str(exc))
-    st.info('تعليماتك ظاهرة، لكن المراجعة والحفظ ينتظران إعداد سجل الفريق. تواصل مع المسؤول.')
+    st.info('المراجعة والحفظ ينتظران الاتصال بسجل الفريق. حاول التحديث أو تواصل مع المسؤول.')
     st.stop()
+
+tasks = resolve_handoffs(tasks, rows)
+task = tasks[reviewer]
+if task.get('admin', False):
+    with st.sidebar:
+        page = st.radio('مساحة المسؤول', ['متابعة الفريق', 'مراجعة العلاقات'], key='admin_page')
+    if page == 'متابعة الفريق':
+        from admin_dashboard import render_dashboard
+        render_dashboard(graph, tasks, rows, reviewer, accounts)
+        if st.button('تحديث التقدم الآن', icon=':material/refresh:', type='primary'):
+            read_rows.clear()
+            st.rerun()
+        st.caption('اضغط تحديث لجلب أحدث سجل من Google Sheets. القراءة مخزنة مؤقتاً لمدة تصل إلى 30 ثانية.')
+        st.stop()
+
+assigned = [e for e in assigned_edges(graph, task)
+            if graph['nodes'][e['parent']]['kind'] == 'قانون' and graph['nodes'][e['child']]['kind'] == 'نظام']
+assigned_ids = {edge['id'] for edge in assigned}
+hero('القانون، أنظمته، وسند إصدارها.','مرحباً '+str(display)+' · تحقق من القانون والنظام ومواد السند، ثم وثّق قرارك.','مراجعة القوانين والأنظمة',True)
+with st.container(key='my_task', border=True):
+    section_title('المطلوب مني', subtitle=task.get('title', 'مراجعة العلاقات المخصصة لك'))
+    st.write(task.get('instructions', 'راجع الحالات في حصتك واتبع خطوات المراجعة أدناه.'))
+    types = lambda key: '، '.join(task.get(key, [])) or 'جميع الأنواع'
+    st.caption('نوع الأب: '+types('parent_types')+' · نوع الابن: '+types('child_types'))
+    if task.get('target', 0):
+        st.caption(f"هدف المهمة: {task['target']} علاقة بقرار تأكيد أو رفض؛ المراجعة الإضافية لا تُحسب حسمًا.")
+    with st.expander('خطوات المراجعة بالتفصيل', expanded=True, icon=':material/checklist:'):
+        for number, step in enumerate(task.get('steps') or DEFAULT_STEPS, 1):
+            st.write(f'{number}. {step}')
 
 summary = summarize(assigned, rows, reviewer)
 metrics([('حصتي',f"{summary['total']:,}",'كل الحالات المخصصة لك','navy'),
@@ -169,8 +188,12 @@ if workspace:
             submitted = st.form_submit_button('حفظ والانتقال للحالة التالية', type='primary', icon=':material/task_alt:', width='stretch')
         if submitted:
             try:
-                if edge_id not in assigned_ids:
-                    raise ValueError('هذه الحالة خارج المهمة المخصصة لك.')
+                live_rows = store.read('EXTRACTED', tuple(dict.fromkeys([graph['version'], *task.get('dataset_versions', [])])))
+                live_tasks = resolve_handoffs(load_tasks(ROOT / 'reviewer_tasks.json'), live_rows)
+                live_ids = {e['id'] for e in assigned_edges(graph, live_tasks.get(reviewer))}
+                if edge_id not in live_ids:
+                    read_rows.clear()
+                    raise ValueError('تغيّرت حصة هذه العلاقة بعد تحديث سجل الفريق. حدّث القائمة؛ لم يُرسل قرارك.')
                 evidence_text = (('مواد القانون التي راجعتها كسند للإصدار: '+legislative_articles.strip()+'\n') if legislative_articles.strip() else '')+text.strip()
                 fingerprint = hashlib.sha256(json.dumps([graph['version'],reviewer,edge_id,verdict,note.strip(),url.strip(),evidence_text],ensure_ascii=False).encode()).hexdigest()
                 pending = st.session_state.setdefault('pending_saves', {})

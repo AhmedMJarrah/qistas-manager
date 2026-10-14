@@ -118,7 +118,8 @@ class SheetsStore:
     def read(self, dataset, version):
         with self._lock:
             try:
-                return [r for r in self._read() if r['dataset'] == dataset and r['dataset_version'] == version]
+                versions = {version} if isinstance(version, str) else set(version)
+                return [r for r in self._read() if r['dataset'] == dataset and r['dataset_version'] in versions]
             except StoreError:
                 raise
             except Exception:
